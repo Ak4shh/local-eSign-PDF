@@ -5,10 +5,11 @@ from datetime import datetime
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit,
+    QListView, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPushButton,
     QStatusBar, QToolBar, QVBoxLayout, QWidget,
 )
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
         self._viewer.overlay_resized.connect(self._on_overlay_resized)
         self._viewer.viewport_page_changed.connect(self._on_viewport_page_changed)
         layout.addWidget(self._viewer, stretch=1)
+        layout.addWidget(self._build_right_panel())
 
         self._build_statusbar()
 
@@ -76,19 +78,19 @@ class MainWindow(QMainWindow):
         tb.setIconSize(QSize(20, 20))
         self.addToolBar(tb)
 
-        self._act_open = QAction("Open PDF…", self)
+        self._act_open = QAction("Open PDF...", self)
         self._act_open.setShortcut("Ctrl+O")
         self._act_open.triggered.connect(self._open_pdf)
         tb.addAction(self._act_open)
 
-        self._act_save = QAction("Save As…", self)
+        self._act_save = QAction("Save As...", self)
         self._act_save.setShortcut("Ctrl+S")
         self._act_save.triggered.connect(self._save_pdf)
         tb.addAction(self._act_save)
 
         tb.addSeparator()
 
-        self._act_prev = QAction("◀ Prev", self)
+        self._act_prev = QAction("Prev", self)
         self._act_prev.triggered.connect(self._prev_page)
         tb.addAction(self._act_prev)
 
@@ -97,13 +99,13 @@ class MainWindow(QMainWindow):
         self._lbl_page.setMinimumWidth(100)
         tb.addWidget(self._lbl_page)
 
-        self._act_next = QAction("Next ▶", self)
+        self._act_next = QAction("Next", self)
         self._act_next.triggered.connect(self._next_page)
         tb.addAction(self._act_next)
 
         tb.addSeparator()
 
-        self._act_zoom_out = QAction("Zoom −", self)
+        self._act_zoom_out = QAction("Zoom -", self)
         self._act_zoom_out.triggered.connect(self._zoom_out)
         tb.addAction(self._act_zoom_out)
 
@@ -119,6 +121,10 @@ class MainWindow(QMainWindow):
         self._act_zoom_reset = QAction("Reset", self)
         self._act_zoom_reset.triggered.connect(self._zoom_reset)
         tb.addAction(self._act_zoom_reset)
+
+        self._act_fit_page = QAction("Fit Page", self)
+        self._act_fit_page.triggered.connect(self._fit_page)
+        tb.addAction(self._act_fit_page)
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -228,6 +234,32 @@ class MainWindow(QMainWindow):
         self._apply_mode_ui(0)
         return panel
 
+    def _build_right_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setFixedWidth(170)
+        panel.setObjectName("rightPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        lbl = QLabel("Pages")
+        lbl.setFont(self._bold_font())
+        layout.addWidget(lbl)
+
+        self._list_pages = QListWidget()
+        self._list_pages.setViewMode(QListView.ViewMode.IconMode)
+        self._list_pages.setFlow(QListView.Flow.TopToBottom)
+        self._list_pages.setMovement(QListView.Movement.Static)
+        self._list_pages.setResizeMode(QListView.ResizeMode.Adjust)
+        self._list_pages.setWrapping(False)
+        self._list_pages.setSpacing(8)
+        self._list_pages.setIconSize(QSize(110, 150))
+        self._list_pages.setGridSize(QSize(130, 190))
+        self._list_pages.setSelectionRectVisible(False)
+        self._list_pages.currentRowChanged.connect(self._on_page_list_selected)
+        layout.addWidget(self._list_pages, stretch=1)
+        return panel
+
     def _build_statusbar(self) -> None:
         sb = QStatusBar()
         self.setStatusBar(sb)
@@ -264,6 +296,9 @@ class MainWindow(QMainWindow):
         self._sb_file.setText(os.path.basename(path))
         self._update_controls()
         self._load_document()
+        self._populate_page_list()
+        self._set_page_list_current(self._current_page)
+        self._fit_page()
 
     def _save_pdf(self) -> None:
         if not self._pdf.is_open:
@@ -312,10 +347,25 @@ class MainWindow(QMainWindow):
     def _zoom_reset(self) -> None:
         self._set_zoom(ZOOM_DEFAULT)
 
+    def _fit_page(self) -> None:
+        if not self._pdf.is_open:
+            return
+        page_index = self._viewer.current_viewport_page()
+        fit_zoom = self._viewer.fit_zoom_for_page(page_index, padding_px=24)
+        if fit_zoom is None:
+            return
+        fit_zoom = max(ZOOM_MIN, min(fit_zoom, ZOOM_MAX))
+        self._set_zoom(fit_zoom)
+        self._viewer.scroll_to_page(page_index)
+
     def _set_zoom(self, zoom: float) -> None:
+        if not self._pdf.is_open:
+            return
+        focus_page = self._viewer.current_viewport_page()
         self._zoom = zoom
         self._pdf.invalidate_cache()
         self._load_document()
+        self._viewer.scroll_to_page(focus_page)
         self._update_controls()
 
     # ------------------------------------------------------------------
@@ -492,6 +542,14 @@ class MainWindow(QMainWindow):
 
     def _on_viewport_page_changed(self, page_index: int) -> None:
         self._current_page = page_index
+        self._set_page_list_current(page_index)
+        self._update_controls()
+
+    def _on_page_list_selected(self, page_index: int) -> None:
+        if not self._pdf.is_open or page_index < 0:
+            return
+        self._viewer.scroll_to_page(page_index)
+        self._current_page = page_index
         self._update_controls()
 
     # ------------------------------------------------------------------
@@ -503,6 +561,26 @@ class MainWindow(QMainWindow):
             return
         pixmaps = self._pdf.render_document(self._zoom)
         self._viewer.load_document(pixmaps, self._overlays, self._zoom)
+
+    def _populate_page_list(self) -> None:
+        self._list_pages.clear()
+        if not self._pdf.is_open:
+            return
+        for i in range(self._pdf.page_count):
+            thumb = self._pdf.render_thumbnail(i, max_width=110, max_height=150)
+            item = QListWidgetItem(QIcon(thumb), str(i + 1))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+            self._list_pages.addItem(item)
+
+    def _set_page_list_current(self, page_index: int) -> None:
+        if not hasattr(self, "_list_pages"):
+            return
+        if page_index < 0 or page_index >= self._list_pages.count():
+            return
+        prev = self._list_pages.blockSignals(True)
+        self._list_pages.setCurrentRow(page_index)
+        self._list_pages.scrollToItem(self._list_pages.item(page_index))
+        self._list_pages.blockSignals(prev)
 
     # ------------------------------------------------------------------
     # UI state helpers
@@ -519,9 +597,11 @@ class MainWindow(QMainWindow):
         self._act_zoom_in.setEnabled(open_ and self._zoom < ZOOM_MAX)
         self._act_zoom_out.setEnabled(open_ and self._zoom > ZOOM_MIN)
         self._act_zoom_reset.setEnabled(open_)
+        self._act_fit_page.setEnabled(open_)
         self._btn_place.setEnabled(open_)
         self._btn_delete.setEnabled(open_)
         self._btn_clear.setEnabled(open_)
+        self._list_pages.setEnabled(open_)
 
         if open_:
             self._lbl_page.setText(f"Page {pg + 1} / {pc}")
@@ -553,6 +633,7 @@ class EditOverlayDialog(QDialog):
     Lets the user change the text, font, color, or image of an existing overlay.
     Call apply_to(overlay) after accept() to commit the changes.
     """
+    preview_changed = Signal()
 
     def __init__(self, overlay: OverlayItem, parent=None):
         super().__init__(parent)
@@ -676,4 +757,4 @@ class EditOverlayDialog(QDialog):
 
         elif ov.type == OverlayType.signature_image:
             overlay.image_path = self._new_image_path
-    preview_changed = Signal()
+

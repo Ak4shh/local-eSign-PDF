@@ -355,6 +355,25 @@ class PdfViewer(QGraphicsView):
     def current_viewport_page(self) -> int:
         return self._current_viewport_page
 
+    def page_count(self) -> int:
+        return len(self._page_rects_scene)
+
+    def scroll_to_page(self, page_index: int) -> None:
+        rect = self._page_rects_scene.get(page_index)
+        if rect is None:
+            return
+        self.centerOn(rect.center())
+        self._emit_viewport_page_changed()
+
+    def fit_zoom_for_page(self, page_index: int, padding_px: int = 24) -> Optional[float]:
+        rect = self._page_rects_scene.get(page_index)
+        if rect is None:
+            return None
+        vp = self.viewport().size()
+        avail_w = max(vp.width() - padding_px, 1)
+        avail_h = max(vp.height() - padding_px, 1)
+        return min(avail_w / max(rect.width(), 1.0), avail_h / max(rect.height(), 1.0))
+
     def _apply_zoom(self, zoom: float) -> None:
         self.resetTransform()
         self.scale(zoom, zoom)

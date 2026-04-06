@@ -21,6 +21,7 @@ class PdfService:
         self._doc: Optional[fitz.Document] = None
         self._path: Optional[str] = None
         self._cache: Dict[Tuple[int, float], QPixmap] = {}
+        self._thumb_cache: Dict[Tuple[int, int, int], QPixmap] = {}
 
     # ------------------------------------------------------------------
     # Open / close
@@ -35,6 +36,7 @@ class PdfService:
         self._doc = doc
         self._path = path
         self._cache.clear()
+        self._thumb_cache.clear()
 
     def close(self) -> None:
         if self._doc is not None:
@@ -42,6 +44,7 @@ class PdfService:
             self._doc = None
         self._path = None
         self._cache.clear()
+        self._thumb_cache.clear()
 
     # ------------------------------------------------------------------
     # Info
@@ -92,6 +95,32 @@ class PdfService:
         if self._doc is None:
             return []
         return [self.render_page(i, zoom) for i in range(self._doc.page_count)]
+
+    def render_thumbnail(
+        self,
+        page_index: int,
+        max_width: int = 120,
+        max_height: int = 170,
+    ) -> QPixmap:
+        key = (page_index, max_width, max_height)
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            return cached
+        if self._doc is None:
+            return QPixmap()
+
+        page = self._doc[page_index]
+        rect = page.rect
+        zoom = min(max_width / max(rect.width, 1.0), max_height / max(rect.height, 1.0))
+        zoom = max(zoom, 0.05)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        img = QImage(
+            pix.samples, pix.width, pix.height, pix.stride,
+            QImage.Format.Format_RGB888,
+        )
+        thumb = QPixmap.fromImage(img)
+        self._thumb_cache[key] = thumb
+        return thumb
 
     # ------------------------------------------------------------------
     # Font-size computation (ground truth for both preview and save)
