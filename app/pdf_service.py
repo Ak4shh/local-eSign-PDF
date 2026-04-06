@@ -88,6 +88,11 @@ class PdfService:
     def invalidate_cache(self) -> None:
         self._cache.clear()
 
+    def render_document(self, zoom: float) -> List[QPixmap]:
+        if self._doc is None:
+            return []
+        return [self.render_page(i, zoom) for i in range(self._doc.page_count)]
+
     # ------------------------------------------------------------------
     # Font-size computation (ground truth for both preview and save)
     # ------------------------------------------------------------------

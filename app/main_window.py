@@ -1,18 +1,19 @@
 from __future__ import annotations
+import copy
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPushButton, QSizePolicy,
+    QMainWindow, QMessageBox, QPushButton,
     QStatusBar, QToolBar, QVBoxLayout, QWidget,
 )
 
-from app.image_service import load_preview_pixmap, validate_image_path
+from app.image_service import validate_image_path
 from app.models import OverlayItem, OverlayType
 from app.pdf_service import PdfService
 from app.pdf_viewer import PdfViewer
@@ -25,6 +26,7 @@ from app.tools import (
     validate_date, validate_name,
     validate_signature_image, validate_typed_signature,
 )
+from app.widgets import StableComboBox
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +65,7 @@ class MainWindow(QMainWindow):
         self._viewer.overlay_deleted.connect(self._on_overlay_deleted)
         self._viewer.overlay_edit_requested.connect(self._on_overlay_edit_requested)
         self._viewer.overlay_resized.connect(self._on_overlay_resized)
+        self._viewer.viewport_page_changed.connect(self._on_viewport_page_changed)
         layout.addWidget(self._viewer, stretch=1)
 
         self._build_statusbar()
@@ -130,7 +133,7 @@ class MainWindow(QMainWindow):
         lbl.setFont(self._bold_font())
         layout.addWidget(lbl)
 
-        self._combo_mode = QComboBox()
+        self._combo_mode = StableComboBox()
         self._combo_mode.addItems(["Typed Signature", "Signature Image", "Name", "Date"])
         self._combo_mode.currentIndexChanged.connect(self._on_mode_changed)
         layout.addWidget(self._combo_mode)
@@ -149,7 +152,7 @@ class MainWindow(QMainWindow):
         gl.addWidget(self._sig_text)
 
         gl.addWidget(QLabel("Font:"))
-        self._combo_font = QComboBox()
+        self._combo_font = StableComboBox()
         for f in SIGNATURE_FONTS:
             self._combo_font.addItem(f["name"])
         gl.addWidget(self._combo_font)
@@ -199,14 +202,14 @@ class MainWindow(QMainWindow):
         layout.addSpacing(4)
         self._lbl_color = QLabel("Color:")
         layout.addWidget(self._lbl_color)
-        self._combo_color = QComboBox()
+        self._combo_color = StableComboBox()
         self._combo_color.addItems([c.capitalize() for c in SUPPORTED_COLORS])
         layout.addWidget(self._combo_color)
 
         layout.addSpacing(8)
 
         # --- Place button ---
-        self._btn_place = QPushButton("Place Overlay")
+        self._btn_place = QPushButton("Place eSign")
         self._btn_place.setMinimumHeight(32)
         self._btn_place.clicked.connect(self._start_placement)
         layout.addWidget(self._btn_place)
@@ -222,7 +225,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._btn_clear)
 
         layout.addStretch()
-        self._on_mode_changed(0)
+        self._apply_mode_ui(0)
         return panel
 
     def _build_statusbar(self) -> None:
@@ -260,7 +263,7 @@ class MainWindow(QMainWindow):
         self._zoom = ZOOM_DEFAULT
         self._sb_file.setText(os.path.basename(path))
         self._update_controls()
-        self._load_current_page()
+        self._load_document()
 
     def _save_pdf(self) -> None:
         if not self._pdf.is_open:
@@ -295,20 +298,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(exc))
 
     def _prev_page(self) -> None:
-        if not self._pdf.is_open or self._current_page <= 0:
-            return
-        self._current_page -= 1
-        self._load_current_page()
-        self._update_controls()
+        self._status_msg("Continuous view enabled. Scroll to navigate pages.")
 
     def _next_page(self) -> None:
-        if not self._pdf.is_open:
-            return
-        if self._current_page >= self._pdf.page_count - 1:
-            return
-        self._current_page += 1
-        self._load_current_page()
-        self._update_controls()
+        self._status_msg("Continuous view enabled. Scroll to navigate pages.")
 
     def _zoom_in(self) -> None:
         self._set_zoom(min(self._zoom + ZOOM_STEP, ZOOM_MAX))
@@ -322,7 +315,7 @@ class MainWindow(QMainWindow):
     def _set_zoom(self, zoom: float) -> None:
         self._zoom = zoom
         self._pdf.invalidate_cache()
-        self._load_current_page()
+        self._load_document()
         self._update_controls()
 
     # ------------------------------------------------------------------
@@ -330,14 +323,25 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_mode_changed(self, index: int) -> None:
+        self._apply_mode_ui(index)
+
+    def _apply_mode_ui(self, index: int) -> None:
         self._grp_typed.setVisible(index == 0)
         self._grp_image.setVisible(index == 1)
         self._grp_name.setVisible(index == 2)
         self._grp_date.setVisible(index == 3)
-        # color picker only for text overlays
         color_visible = index in (0, 2, 3)
         self._lbl_color.setVisible(color_visible)
         self._combo_color.setVisible(color_visible)
+        self._btn_place.setText(self._place_label_for_mode(index))
+
+    @staticmethod
+    def _place_label_for_mode(index: int) -> str:
+        if index in (0, 1):
+            return "Place eSign"
+        if index == 2:
+            return "Place Name"
+        return "Place Date"
 
     def _browse_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -416,11 +420,14 @@ class MainWindow(QMainWindow):
         self._viewer.delete_selected()
 
     def _clear_overlays(self) -> None:
+        if not self._pdf.is_open:
+            return
+        page_index = self._viewer.current_viewport_page()
         page_ids = {
-            ov.id for ov in self._overlays if ov.page_index == self._current_page
+            ov.id for ov in self._overlays if ov.page_index == page_index
         }
         self._overlays = [ov for ov in self._overlays if ov.id not in page_ids]
-        self._viewer.clear_overlays()
+        self._viewer.clear_overlays_for_page(page_index)
         self._status_msg("Cleared all overlays on this page.")
 
     # ------------------------------------------------------------------
@@ -428,7 +435,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_overlay_placed(self, overlay: OverlayItem) -> None:
-        overlay.page_index = self._current_page
         self._compute_overlay_font_size(overlay)
         self._viewer.refresh_overlay(overlay.id)
         self._overlays.append(overlay)
@@ -458,24 +464,45 @@ class MainWindow(QMainWindow):
         self._overlays = [ov for ov in self._overlays if ov.id != overlay_id]
 
     def _on_overlay_edit_requested(self, overlay: OverlayItem) -> None:
+        original_overlay = copy.deepcopy(overlay)
         dialog = EditOverlayDialog(overlay, self)
+        dialog.preview_changed.connect(lambda: self._on_overlay_live_changed(overlay))
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.apply_to(overlay)
             self._compute_overlay_font_size(overlay)
             self._viewer.refresh_overlay(overlay.id)
+        else:
+            self._restore_overlay(overlay, original_overlay)
+            self._viewer.refresh_overlay(overlay.id)
+
+    def _on_overlay_live_changed(self, overlay: OverlayItem) -> None:
+        self._compute_overlay_font_size(overlay)
+        self._viewer.refresh_overlay(overlay.id)
+
+    @staticmethod
+    def _restore_overlay(target: OverlayItem, source: OverlayItem) -> None:
+        target.page_index = source.page_index
+        target.type = source.type
+        target.rect_pdf = source.rect_pdf
+        target.text = source.text
+        target.font_name = source.font_name
+        target.color = source.color
+        target.image_path = source.image_path
+        target.font_size = source.font_size
+
+    def _on_viewport_page_changed(self, page_index: int) -> None:
+        self._current_page = page_index
+        self._update_controls()
 
     # ------------------------------------------------------------------
     # Page rendering
     # ------------------------------------------------------------------
 
-    def _load_current_page(self) -> None:
+    def _load_document(self) -> None:
         if not self._pdf.is_open:
             return
-        pixmap = self._pdf.render_page(self._current_page, self._zoom)
-        page_overlays = [
-            ov for ov in self._overlays if ov.page_index == self._current_page
-        ]
-        self._viewer.load_page(pixmap, page_overlays, self._zoom)
+        pixmaps = self._pdf.render_document(self._zoom)
+        self._viewer.load_document(pixmaps, self._overlays, self._zoom)
 
     # ------------------------------------------------------------------
     # UI state helpers
@@ -487,8 +514,8 @@ class MainWindow(QMainWindow):
         pg = self._current_page
 
         self._act_save.setEnabled(open_)
-        self._act_prev.setEnabled(open_ and pg > 0)
-        self._act_next.setEnabled(open_ and pg < pc - 1)
+        self._act_prev.setEnabled(False)
+        self._act_next.setEnabled(False)
         self._act_zoom_in.setEnabled(open_ and self._zoom < ZOOM_MAX)
         self._act_zoom_out.setEnabled(open_ and self._zoom > ZOOM_MIN)
         self._act_zoom_reset.setEnabled(open_)
@@ -533,9 +560,11 @@ class EditOverlayDialog(QDialog):
         self.setMinimumWidth(320)
         self._overlay = overlay
         self._new_image_path: Optional[str] = overlay.image_path
+        self._suspend_preview = False
         self._build_ui()
 
     def _build_ui(self) -> None:
+        self._suspend_preview = True
         layout = QVBoxLayout(self)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
@@ -544,24 +573,29 @@ class EditOverlayDialog(QDialog):
 
         if ov.type == OverlayType.typed_signature:
             self._text_edit = QLineEdit(ov.text or "")
+            self._text_edit.textChanged.connect(self._on_live_input_changed)
             form.addRow("Signature text:", self._text_edit)
 
-            self._font_combo = QComboBox()
+            self._font_combo = StableComboBox()
             for f in SIGNATURE_FONTS:
                 self._font_combo.addItem(f["name"])
             idx = next((i for i, f in enumerate(SIGNATURE_FONTS) if f["name"] == ov.font_name), 0)
             self._font_combo.setCurrentIndex(idx)
+            self._font_combo.currentIndexChanged.connect(self._on_live_input_changed)
             form.addRow("Font:", self._font_combo)
 
             self._color_combo = self._make_color_combo(ov.color)
+            self._color_combo.currentIndexChanged.connect(self._on_live_input_changed)
             form.addRow("Color:", self._color_combo)
 
         elif ov.type in (OverlayType.name, OverlayType.date):
             label = "Name:" if ov.type == OverlayType.name else "Date:"
             self._text_edit = QLineEdit(ov.text or "")
+            self._text_edit.textChanged.connect(self._on_live_input_changed)
             form.addRow(label, self._text_edit)
 
             self._color_combo = self._make_color_combo(ov.color)
+            self._color_combo.currentIndexChanged.connect(self._on_live_input_changed)
             form.addRow("Color:", self._color_combo)
 
         elif ov.type == OverlayType.signature_image:
@@ -582,10 +616,11 @@ class EditOverlayDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._suspend_preview = False
 
     @staticmethod
-    def _make_color_combo(current: Optional[str]) -> QComboBox:
-        combo = QComboBox()
+    def _make_color_combo(current: Optional[str]) -> StableComboBox:
+        combo = StableComboBox()
         combo.addItems([c.capitalize() for c in SUPPORTED_COLORS])
         if current in SUPPORTED_COLORS:
             combo.setCurrentIndex(SUPPORTED_COLORS.index(current))
@@ -597,8 +632,32 @@ class EditOverlayDialog(QDialog):
             "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.tif *.webp)"
         )
         if path:
+            err = validate_image_path(path)
+            if err:
+                QMessageBox.warning(self, "Invalid image", err)
+                return
             self._new_image_path = path
             self._lbl_img.setText(os.path.basename(path))
+            self._apply_live_to_overlay()
+            self.preview_changed.emit()
+
+    def _on_live_input_changed(self) -> None:
+        self._apply_live_to_overlay()
+        self.preview_changed.emit()
+
+    def _apply_live_to_overlay(self) -> None:
+        if self._suspend_preview:
+            return
+        ov = self._overlay
+        if ov.type == OverlayType.typed_signature:
+            ov.text = self._text_edit.text()
+            ov.font_name = self._font_combo.currentText()
+            ov.color = SUPPORTED_COLORS[self._color_combo.currentIndex()]
+        elif ov.type in (OverlayType.name, OverlayType.date):
+            ov.text = self._text_edit.text()
+            ov.color = SUPPORTED_COLORS[self._color_combo.currentIndex()]
+        elif ov.type == OverlayType.signature_image:
+            ov.image_path = self._new_image_path
 
     def apply_to(self, overlay: OverlayItem) -> None:
         ov = self._overlay
@@ -617,3 +676,4 @@ class EditOverlayDialog(QDialog):
 
         elif ov.type == OverlayType.signature_image:
             overlay.image_path = self._new_image_path
+    preview_changed = Signal()
