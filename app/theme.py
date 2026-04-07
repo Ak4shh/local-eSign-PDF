@@ -91,6 +91,13 @@ def build_stylesheet(tokens: ThemeTokens) -> str:
     t = tokens.typography
 
     return f"""
+QWidget {{
+    color: {c.text};
+    font-family: "{t.family}";
+    font-size: {t.body_px}px;
+    font-weight: 600;
+}}
+
 QMainWindow#mainWindow {{
     background: {c.app_bg};
 }}
@@ -256,6 +263,16 @@ QPushButton[role="danger"] {{
     background: {c.danger_bg};
     color: {c.danger_text};
     border-color: {c.border};
+}}
+
+QPushButton[role="danger"]:hover {{
+    background: {c.active_fill};
+    border-color: {c.active_border};
+}}
+
+QPushButton[role="danger"]:pressed {{
+    background: {c.panel_bg};
+    border-color: {c.active_border};
 }}
 
 QListWidget#pageList {{

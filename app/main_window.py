@@ -129,13 +129,11 @@ class MainWindow(QMainWindow):
         self._act_save = QAction("Save As", self)
         self._act_save.setShortcut("Ctrl+S")
         self._act_save.triggered.connect(self._save_pdf)
-        tb.addAction(self._act_save)
 
         tb.addWidget(self._toolbar_gap(14))
 
         self._act_prev = QAction("Prev", self)
         self._act_prev.triggered.connect(self._prev_page)
-        tb.addAction(self._act_prev)
 
         self._lbl_page = QLabel("Page 0 / 0")
         self._lbl_page.setObjectName("toolbarPageLabel")
@@ -145,9 +143,7 @@ class MainWindow(QMainWindow):
 
         self._act_next = QAction("Next", self)
         self._act_next.triggered.connect(self._next_page)
-        tb.addAction(self._act_next)
-
-        tb.addWidget(self._toolbar_gap(12))
+        tb.addWidget(self._toolbar_gap(8))
 
         self._act_zoom_out = QAction("Zoom -", self)
         self._act_zoom_out.triggered.connect(self._zoom_out)

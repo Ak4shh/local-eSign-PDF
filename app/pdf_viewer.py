@@ -3,7 +3,7 @@ from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen, QPixmap,
+    QBrush, QColor, QCursor, QFont, QPainter, QPainterPath, QPen, QPixmap, QTransform,
     QKeyEvent,
 )
 from PySide6.QtWidgets import (
@@ -12,10 +12,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.models import OverlayItem, OverlayType, PdfRect
+from app.image_service import load_preview_pixmap
 from app.settings import THEME
 from app.tools import PendingPlacement
 from app.utils import (
-    color_name_to_qcolor, normalize_rect, fit_font_size,
+    aspect_fit, color_name_to_qcolor, normalize_rect, fit_font_size,
 )
 
 _HANDLE_SIZE = 6.0
@@ -60,6 +61,8 @@ class OverlayGraphicsItem(QGraphicsRectItem):
     BORDER_COLOR = _theme_color(THEME.colors.active_border)
     IDLE_BORDER_COLOR = _theme_color(THEME.colors.border)
 
+    _IMAGE_CACHE: Dict[str, QPixmap] = {}
+
     def __init__(
         self,
         overlay: OverlayItem,
@@ -76,6 +79,7 @@ class OverlayGraphicsItem(QGraphicsRectItem):
         self._on_changed = on_changed
         self._on_resized = on_resized
         self._label: Optional[QGraphicsSimpleTextItem] = None
+        self._image_item: Optional[QGraphicsPixmapItem] = None
 
         self._drag_mode: int | str | None = None
         self._drag_start_scene = QPointF()
@@ -154,7 +158,16 @@ class OverlayGraphicsItem(QGraphicsRectItem):
         r = self.rect()
         text = ov.text or ""
 
-        if ov.type == OverlayType.signature_image or not text:
+        if ov.type == OverlayType.signature_image:
+            self._refresh_image()
+            if self._label is not None:
+                self._label.setVisible(False)
+            return
+
+        if self._image_item is not None:
+            self._image_item.setVisible(False)
+
+        if not text:
             if self._label is not None:
                 self._label.setVisible(False)
             return
@@ -185,6 +198,46 @@ class OverlayGraphicsItem(QGraphicsRectItem):
         lx = r.x() + (r.width() - lb.width()) / 2
         ly = r.y() + (r.height() - lb.height()) / 2
         self._label.setPos(lx, ly)
+
+    def _refresh_image(self) -> None:
+        path = self.overlay.image_path or ""
+        if not path:
+            if self._image_item is not None:
+                self._image_item.setVisible(False)
+            return
+
+        source = self._IMAGE_CACHE.get(path)
+        if source is None:
+            pixmap, err = load_preview_pixmap(path)
+            if err or pixmap is None or pixmap.isNull():
+                if self._image_item is not None:
+                    self._image_item.setVisible(False)
+                return
+            source = pixmap
+            self._IMAGE_CACHE[path] = source
+
+        if self._image_item is None:
+            self._image_item = QGraphicsPixmapItem(self)
+            self._image_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+
+        self._image_item.setVisible(True)
+        self._image_item.setPixmap(source)
+
+        r = self.rect()
+        x, y, w, h = aspect_fit(
+            float(source.width()),
+            float(source.height()),
+            float(r.width()),
+            float(r.height()),
+        )
+        self._image_item.setPos(r.x() + x, r.y() + y)
+
+        sx = (w / max(float(source.width()), 1.0))
+        sy = (h / max(float(source.height()), 1.0))
+        transform = QTransform()
+        transform.scale(sx, sy)
+        self._image_item.setTransform(transform)
 
     def refresh(self) -> None:
         self.prepareGeometryChange()
