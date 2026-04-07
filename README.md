@@ -1,95 +1,99 @@
-# PDF eSign
+# PDF eSign (Visual PDF Signature Tool)
 
-Desktop app to place signatures, names, dates, and images on PDFs and save a flattened signed copy.
+## Description
+PDF eSign is a local desktop application for placing visual signature overlays on PDF files and exporting a flattened output document.
+
+This project is a **visual PDF signature/annotation tool**, not a certified digital-signature platform. It is designed for speed, simplicity, and offline/local workflows.
 
 ## Features
-- Open and preview PDF files
-- Add overlays:
-  - Typed signature (custom signature fonts)
-  - Signature image
+- Open and preview PDF documents locally
+- Add and edit overlays:
+  - Typed Signature
+  - Signature Image
   - Name
   - Date
-- Drag, resize, edit, and delete overlays before saving
-- Save signed output as a new flattened PDF
+- Drag, resize, move, edit, and delete overlays before export
+- Save a flattened PDF output with overlays applied
+- Local-first workflow (no cloud dependency)
 
-## Tech Stack
+## Screenshots
+- Main window and overlay tools: *(add screenshot)*
+- Overlay placement and editing: *(add screenshot)*
+- Exported output example: *(add screenshot)*
+
+## Installation
+### Requirements
 - Python 3.11+
-- PySide6 (UI)
-- PyMuPDF / `fitz` (PDF rendering + save)
+- Windows desktop environment (primary target)
 
-## Project Structure
-```text
-.
-|-- main.py
-|-- requirements.txt
-|-- assets/
-|   `-- fonts/
-`-- app/
-    |-- main_window.py
-    |-- pdf_service.py
-    |-- pdf_viewer.py
-    |-- models.py
-    |-- settings.py
-    |-- tools.py
-    |-- utils.py
-    `-- image_service.py
-```
-
-## Setup
-1. Create and activate a virtual environment.
-2. Install dependencies:
-
+### Setup
 ```bash
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Run
+## Usage
+1. Run the app:
 ```bash
 python main.py
 ```
+2. Open a PDF using **Open PDF**.
+3. Choose an overlay type in **Overlay Tools**.
+4. Enter text or select a signature image.
+5. Click **Place eSign** (or the relevant Place button), then draw on the page.
+6. Adjust overlay position/size as needed.
+7. Export using **Save Document**.
 
-## Usage
-1. Click **Open PDF**.
-2. Choose overlay type in the left panel.
-3. Enter text or select image as needed.
-4. Click **Place Overlay** and draw on the page.
-5. Adjust overlay position/size if needed.
-6. Click **Save As** to export signed PDF.
+## How It Works
+- The app uses overlay objects for signature/name/date/image elements.
+- Overlay geometry is stored in **PDF point coordinates** (not screen pixels), so zooming does not change saved positions.
+- On export, overlays are flattened into the output PDF.
 
-## Notes
-- Signature fonts are loaded from `assets/fonts`.
-- This app is local-only; no cloud upload is required.
+### Signature Rendering Behavior
+- **Typed Signature** overlays are rendered as **visual graphics (image content)** in the output PDF.
+  - They are intentionally non-selectable as text.
+- **Name** and **Date** overlays are saved as regular PDF text.
+- **Signature Image** overlays are embedded as image content.
 
-## Legal Notice and Disclaimer
-This project is provided for general document annotation and e-sign workflow support. It is not a law firm and does not provide legal advice. Use of this software does not create an attorney-client relationship.
+## Limitations
+- No built-in signer identity verification
+- No cryptographic digital-signature certificate workflow
+- No tamper-evident audit trail
+- No legal compliance engine for ESIGN/UETA/eIDAS
+- No guarantee that generated documents meet jurisdiction-specific e-sign requirements
 
-### No Guarantee of Legal Enforceability
-Whether an electronically signed document is legally enforceable depends on your jurisdiction, industry, document type, consent process, identity verification, record retention, and applicable laws (for example, ESIGN, UETA, eIDAS, or other local regulations). You are solely responsible for determining legal validity for your use case.
+## Disclaimer
+This software is provided for visual PDF signing/annotation workflows only.
 
-### User Responsibility
-By using this software, you agree that you are responsible for:
-- obtaining all required consents and disclosures;
-- verifying signer identity where required;
-- maintaining audit trails and records where required;
-- complying with all applicable privacy, consumer, and electronic signature laws;
-- verifying output accuracy before relying on any signed document.
+It is **not** a certified digital-signature solution and does **not** provide:
+- cryptographic signing certificates,
+- signer identity proofing,
+- audit trail or non-repudiation controls,
+- legal enforceability guarantees.
 
-### Security and Data Handling
-- Files are processed locally on your machine by default.
-- You are responsible for endpoint security, device access control, backup, malware protection, and secure storage/transmission of PDFs and signatures.
-- Do not use this tool for regulated or high-risk workflows unless you have independently validated legal and technical compliance.
+You are solely responsible for legal, regulatory, and policy compliance in your jurisdiction and use case, including (where applicable) ESIGN, UETA, eIDAS, and record-retention requirements.
 
-### Warranty Disclaimer
-THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+The software is provided **"AS IS"**, without warranties of any kind.
 
-### Limitation of Liability
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE AUTHORS AND CONTRIBUTORS ARE NOT LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR EXEMPLARY DAMAGES, OR ANY LOSS OF DATA, REVENUE, PROFITS, OR BUSINESS OPPORTUNITY, ARISING FROM USE OF THE SOFTWARE.
+## Tech Stack
+- Python
+- PySide6 (desktop UI)
+- PyMuPDF / `fitz` (PDF rendering and output)
 
-### Third-Party Components
-This project uses third-party libraries and fonts that are licensed separately. You are responsible for reviewing and complying with their license terms when distributing source code or executables.
+## Contributing
+Contributions are welcome.
 
-### Release Guidance
-Before shipping a desktop executable to users or customers, have your Terms of Use, Privacy Notice, and e-sign compliance flow reviewed by qualified counsel in each target jurisdiction.
+If you plan to contribute:
+1. Open an issue describing the problem or proposal.
+2. Keep changes focused and testable.
+3. Submit a pull request with a clear summary of behavior changes.
+
+## Future Improvements
+- Optional audit trail metadata
+- Optional cryptographic digital-signature integration
+- Optional signer verification integrations
+- Batch and template workflows
 
 ## License
-See [`LICENSE`](LICENSE) for the repository license.
+See [LICENSE](LICENSE).
