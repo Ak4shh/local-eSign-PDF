@@ -124,6 +124,7 @@ QToolBar#mainToolbar QToolButton {{
     min-height: {z.compact_control_height}px;
     font-family: "{t.family}";
     font-size: {t.body_px}px;
+    text-align: center;
 }}
 
 QToolBar#mainToolbar QToolButton:hover {{
@@ -219,6 +220,7 @@ QPushButton {{
     min-height: {z.control_height}px;
     font-family: "{t.family}";
     font-size: {t.body_px}px;
+    text-align: center;
 }}
 
 QPushButton:hover {{
@@ -273,16 +275,6 @@ QPushButton[role="danger"]:hover {{
 QPushButton[role="danger"]:pressed {{
     background: {c.panel_bg};
     border-color: {c.active_border};
-}}
-
-QPushButton[iconButton="true"] {{
-    padding-left: 8px;
-    padding-right: 14px;
-}}
-
-QPushButton[penNudge="true"] {{
-    padding-top: 6px;
-    padding-bottom: 2px;
 }}
 
 QListWidget#pageList {{

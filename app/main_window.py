@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QAction, QFont, QIcon
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -86,7 +86,22 @@ class MainWindow(QMainWindow):
             return
         button.setIcon(icon)
         button.setIconSize(QSize(size, size))
-        button.setProperty("iconButton", True)
+
+    def _svg_icon_tinted(self, filename: str, color: str, size: int = 14) -> QIcon:
+        base = self._svg_icon(filename)
+        if base.isNull():
+            return base
+        source = base.pixmap(size, size)
+        if source.isNull():
+            return base
+        tinted = QPixmap(source.size())
+        tinted.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(tinted)
+        painter.drawPixmap(0, 0, source)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(tinted.rect(), QColor(color))
+        painter.end()
+        return QIcon(tinted)
 
     def _apply_theme(self) -> None:
         app = QApplication.instance()
@@ -175,10 +190,12 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_zoom_in)
 
         self._act_zoom_reset = QAction("Reset", self)
+        self._act_zoom_reset.setIcon(self._svg_icon("reset.svg"))
         self._act_zoom_reset.triggered.connect(self._zoom_reset)
         tb.addAction(self._act_zoom_reset)
 
         self._act_fit_page = QAction("Fit Page", self)
+        self._act_fit_page.setIcon(self._svg_icon("fitpage.svg"))
         self._act_fit_page.triggered.connect(self._fit_page)
         tb.addAction(self._act_fit_page)
 
@@ -335,7 +352,6 @@ class MainWindow(QMainWindow):
 
         self._btn_place = QPushButton("Place eSign")
         self._btn_place.setProperty("role", "quiet")
-        self._btn_place.setProperty("penNudge", True)
         self._btn_place.clicked.connect(self._start_placement)
         self._apply_button_icon(self._btn_place, self._svg_icon("pen.svg"))
         action_layout.addWidget(self._btn_place)
@@ -355,7 +371,10 @@ class MainWindow(QMainWindow):
         self._btn_save_doc = QPushButton("Save Document")
         self._btn_save_doc.setProperty("role", "primary")
         self._btn_save_doc.clicked.connect(self._save_pdf)
-        self._apply_button_icon(self._btn_save_doc, self._svg_icon("save.svg"))
+        self._apply_button_icon(
+            self._btn_save_doc,
+            self._svg_icon_tinted("save.svg", THEME.colors.primary_text),
+        )
         action_layout.addWidget(self._btn_save_doc)
 
         layout.addWidget(action_card)
