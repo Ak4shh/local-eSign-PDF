@@ -1,11 +1,11 @@
 from __future__ import annotations
+
 import os
 import shutil
 import tempfile
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
-import fitz  # PyMuPDF
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPointF, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetricsF, QImage, QPainter, QPixmap
 
@@ -16,11 +16,27 @@ from app.utils import color_name_to_mupdf, color_name_to_qcolor
 # Map display font name -> file name
 _FONT_FILE_MAP: Dict[str, str] = {f["name"]: f["file"] for f in SIGNATURE_FONTS}
 
+# ── Lazy MuPDF backend ───────────────────────────────────────────────────────
+# fitz/PyMuPDF is large (~37 MB) and slow to import.  We defer loading it
+# until the first PDF operation so the window appears before MuPDF initialises.
+
+_fitz_module = None
+
+
+def _fitz():
+    """Return the fitz module, importing and initialising it on first call."""
+    global _fitz_module
+    if _fitz_module is None:
+        import fitz as _m
+        _m.TOOLS.mupdf_display_errors(False)
+        _fitz_module = _m
+    return _fitz_module
+
 
 class PdfService:
     def __init__(self, fonts_dir: str) -> None:
         self._fonts_dir = fonts_dir
-        self._doc: Optional[fitz.Document] = None
+        self._doc = None          # fitz.Document — typed lazily to avoid import
         self._path: Optional[str] = None
         self._cache: Dict[Tuple[int, float], QPixmap] = {}
         self._thumb_cache: Dict[Tuple[int, int, int], QPixmap] = {}
@@ -32,6 +48,7 @@ class PdfService:
     # ------------------------------------------------------------------
 
     def open(self, path: str) -> None:
+        fitz = _fitz()
         self.close()
         doc = fitz.open(path)
         if doc.is_encrypted:
@@ -84,6 +101,7 @@ class PdfService:
         if key in self._cache:
             return self._cache[key]
 
+        fitz = _fitz()
         page = self._doc[page_index]
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
@@ -117,6 +135,7 @@ class PdfService:
         if self._doc is None:
             return QPixmap()
 
+        fitz = _fitz()
         page = self._doc[page_index]
         rect = page.rect
         zoom = min(max_width / max(rect.width, 1.0), max_height / max(rect.height, 1.0))
@@ -150,6 +169,7 @@ class PdfService:
         if not text or rect_w <= 0 or rect_h <= 0:
             return 8.0
 
+        fitz = _fitz()
         try:
             font_file = _FONT_FILE_MAP.get(font_name or "")
             if font_file:
@@ -192,6 +212,7 @@ class PdfService:
             raise RuntimeError("No PDF is open.")
         self._last_save_warnings = []
 
+        fitz = _fitz()
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -229,8 +250,8 @@ class PdfService:
 
     def _insert_typed_signature(
         self,
-        page: fitz.Page,
-        rect: fitz.Rect,
+        page,
+        rect,
         overlay: OverlayItem,
         color: Tuple[float, float, float],
     ) -> None:
@@ -259,11 +280,12 @@ class PdfService:
 
     def _insert_typed_signature_as_text(
         self,
-        page: fitz.Page,
-        rect: fitz.Rect,
+        page,
+        rect,
         overlay: OverlayItem,
         color: Tuple[float, float, float],
     ) -> None:
+        fitz = _fitz()
         font_file = _FONT_FILE_MAP.get(overlay.font_name or "")
         text = overlay.text or ""
 
@@ -292,7 +314,7 @@ class PdfService:
     def _render_typed_signature_png_stream(
         self,
         overlay: OverlayItem,
-        rect: fitz.Rect,
+        rect,
     ) -> bytes:
         text = (overlay.text or "").strip()
         if not text:
@@ -382,12 +404,13 @@ class PdfService:
 
     def _insert_text(
         self,
-        page: fitz.Page,
-        rect: fitz.Rect,
+        page,
+        rect,
         text: str,
         color: Tuple[float, float, float],
         font_size: Optional[float] = None,
     ) -> None:
+        fitz = _fitz()
         fitz_font = fitz.Font("helv")
         size = font_size or self.compute_font_size(text, None, rect.width, rect.height)
         self._insert_centered_text_line(
@@ -402,11 +425,11 @@ class PdfService:
 
     def _insert_centered_text_line(
         self,
-        page: fitz.Page,
-        rect: fitz.Rect,
+        page,
+        rect,
         text: str,
         color: Tuple[float, float, float],
-        fitz_font: fitz.Font,
+        fitz_font,
         fontname: str,
         fontsize: float,
     ) -> None:
@@ -414,6 +437,7 @@ class PdfService:
         if not text or fontsize <= 0:
             return
 
+        fitz = _fitz()
         asc = fitz_font.ascender
         desc = fitz_font.descender
         line_height = max((asc - desc) * fontsize, fontsize)
@@ -435,6 +459,6 @@ class PdfService:
         )
 
     def _insert_image(
-        self, page: fitz.Page, rect: fitz.Rect, image_path: str
+        self, page, rect, image_path: str
     ) -> None:
         page.insert_image(rect, filename=image_path, keep_proportion=True, overlay=True)

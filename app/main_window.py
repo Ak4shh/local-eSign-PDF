@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
 from app.image_service import validate_image_path
 from app.models import OverlayItem, OverlayType
 from app.paths import resource_path
-from app.pdf_service import PdfService
 from app.pdf_viewer import PdfViewer
 from app.settings import (
     APP_NAME,
@@ -61,7 +60,7 @@ class MainWindow(QMainWindow):
     def __init__(self, fonts_dir: str) -> None:
         super().__init__()
         self._fonts_dir = fonts_dir
-        self._pdf = PdfService(fonts_dir)
+        self._pdf_service = None   # created lazily on first PDF action
         self._overlays: List[OverlayItem] = []
         self._current_page: int = 0
         self._zoom: float = ZOOM_DEFAULT
@@ -75,6 +74,18 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self._build_ui()
         self._update_controls()
+
+    @property
+    def _pdf(self):
+        """Lazily create PdfService on first PDF-related action.
+
+        Deferring construction keeps the window boot path free of the
+        fitz/PyMuPDF import cost (~37 MB DLL, visible on cold starts).
+        """
+        if self._pdf_service is None:
+            from app.pdf_service import PdfService
+            self._pdf_service = PdfService(self._fonts_dir)
+        return self._pdf_service
 
     def _svg_icon(self, filename: str) -> QIcon:
         svg_path = resource_path("SVGs", filename)
@@ -162,17 +173,12 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(self._toolbar_gap(14))
 
-        self._act_prev = QAction("Prev", self)
-        self._act_prev.triggered.connect(self._prev_page)
-
         self._lbl_page = QLabel("Page 0 / 0")
         self._lbl_page.setObjectName("toolbarPageLabel")
         self._lbl_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_page.setMinimumWidth(120)
         tb.addWidget(self._lbl_page)
 
-        self._act_next = QAction("Next", self)
-        self._act_next.triggered.connect(self._next_page)
         tb.addWidget(self._toolbar_gap(8))
 
         self._act_zoom_out = QAction("Zoom -", self)
@@ -487,12 +493,6 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
 
-    def _prev_page(self) -> None:
-        self._status_msg("Continuous view enabled. Scroll to navigate pages.")
-
-    def _next_page(self) -> None:
-        self._status_msg("Continuous view enabled. Scroll to navigate pages.")
-
     def _zoom_in(self) -> None:
         self._set_zoom(min(self._zoom + ZOOM_STEP, ZOOM_MAX))
 
@@ -729,8 +729,6 @@ class MainWindow(QMainWindow):
         pg = self._current_page
 
         self._act_save.setEnabled(open_)
-        self._act_prev.setEnabled(False)
-        self._act_next.setEnabled(False)
         self._act_zoom_in.setEnabled(open_ and self._zoom < ZOOM_MAX)
         self._act_zoom_out.setEnabled(open_ and self._zoom > ZOOM_MIN)
         self._act_zoom_reset.setEnabled(open_)
@@ -755,12 +753,6 @@ class MainWindow(QMainWindow):
 
     def _status_msg(self, msg: str) -> None:
         self._sb_msg.setText(msg)
-
-    @staticmethod
-    def _bold_font() -> QFont:
-        font = QFont()
-        font.setWeight(QFont.Weight.DemiBold)
-        return font
 
 
 class EditOverlayDialog(QDialog):

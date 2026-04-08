@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Tuple
-from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor
 
 from app.models import PdfRect
@@ -56,10 +55,6 @@ def color_name_to_mupdf(color_name: str) -> Tuple[float, float, float]:
         "blue": (0.0, 0.0, 0.706),
     }
     return mapping.get(color_name, (0.0, 0.0, 0.0))
-
-
-def pdf_rect_to_qrectf(r: PdfRect) -> QRectF:
-    return QRectF(r.x, r.y, r.width, r.height)
 
 
 def fit_font_size(
