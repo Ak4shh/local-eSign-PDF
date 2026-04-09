@@ -69,7 +69,7 @@ class OverlayGraphicsItem(QGraphicsRectItem):
         zoom: float,
         model_to_scene_rect: Callable[[OverlayItem], QRectF],
         on_changed: Callable[[OverlayItem, QRectF], QRectF],
-        on_resized=None,
+        on_geometry_committed=None,
         parent: QGraphicsItem | None = None,
     ):
         super().__init__(model_to_scene_rect(overlay), parent)
@@ -77,13 +77,14 @@ class OverlayGraphicsItem(QGraphicsRectItem):
         self._zoom = zoom
         self._model_to_scene_rect = model_to_scene_rect
         self._on_changed = on_changed
-        self._on_resized = on_resized
+        self._on_geometry_committed = on_geometry_committed
         self._label: Optional[QGraphicsSimpleTextItem] = None
         self._image_item: Optional[QGraphicsPixmapItem] = None
 
         self._drag_mode: int | str | None = None
         self._drag_start_scene = QPointF()
         self._drag_start_rect = QRectF()
+        self._drag_start_pdf_rect: Optional[PdfRect] = None
 
         self._setup()
 
@@ -273,6 +274,12 @@ class OverlayGraphicsItem(QGraphicsRectItem):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_scene = event.scenePos()
             self._drag_start_rect = QRectF(self.rect())
+            self._drag_start_pdf_rect = PdfRect(
+                self.overlay.rect_pdf.x,
+                self.overlay.rect_pdf.y,
+                self.overlay.rect_pdf.width,
+                self.overlay.rect_pdf.height,
+            )
             i = self._hit_handle(event.pos())
             if i >= 0:
                 self._drag_mode = i
@@ -315,17 +322,28 @@ class OverlayGraphicsItem(QGraphicsRectItem):
 
     def mouseReleaseEvent(self, event) -> None:
         mode = self._drag_mode
+        before = self._drag_start_pdf_rect
         self._drag_mode = None
+        self._drag_start_pdf_rect = None
         super().mouseReleaseEvent(event)
-        if mode is not None and mode != "move" and self._on_resized:
-            self._on_resized(self.overlay)
+        if mode is None or before is None or self._on_geometry_committed is None:
+            return
+        after = PdfRect(
+            self.overlay.rect_pdf.x,
+            self.overlay.rect_pdf.y,
+            self.overlay.rect_pdf.width,
+            self.overlay.rect_pdf.height,
+        )
+        if before != after:
+            self._on_geometry_committed(self.overlay, before, after)
 
 
 class PdfViewer(QGraphicsView):
-    overlay_placed = Signal(OverlayItem)
-    overlay_deleted = Signal(str)
+    overlay_placement_requested = Signal(object)
+    delete_requested = Signal(object)
     overlay_edit_requested = Signal(OverlayItem)
-    overlay_resized = Signal(OverlayItem)
+    overlay_geometry_change_committed = Signal(str, object, object)
+    selection_changed = Signal(object)
     viewport_page_changed = Signal(int)
 
     def __init__(self, parent=None):
@@ -339,6 +357,7 @@ class PdfViewer(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setBackgroundBrush(QBrush(_theme_color(THEME.colors.workspace_bg)))
+        self._scene.selectionChanged.connect(self._on_scene_selection_changed)
 
         self._zoom = 1.0
         self._pending: Optional[PendingPlacement] = None
@@ -408,13 +427,21 @@ class PdfViewer(QGraphicsView):
         if item:
             item.refresh()
 
+    def add_overlay(self, overlay: OverlayItem, select: bool = False) -> Optional[OverlayGraphicsItem]:
+        item = self._add_overlay_item(overlay)
+        if item is not None and select:
+            self.set_selected_overlay_ids([overlay.id])
+        return item
+
+    def remove_overlay(self, overlay_id: str) -> None:
+        item = self._overlay_items.pop(overlay_id, None)
+        if item is not None:
+            self._scene.removeItem(item)
+
     def delete_selected(self) -> None:
-        for item in list(self._scene.selectedItems()):
-            if isinstance(item, OverlayGraphicsItem):
-                ov_id = item.overlay.id
-                self._scene.removeItem(item)
-                self._overlay_items.pop(ov_id, None)
-                self.overlay_deleted.emit(ov_id)
+        overlay_ids = self.selected_overlay_ids()
+        if overlay_ids:
+            self.delete_requested.emit(overlay_ids)
 
     def clear_overlays_for_page(self, page_index: int) -> None:
         remove_ids = [
@@ -427,6 +454,43 @@ class PdfViewer(QGraphicsView):
 
     def current_viewport_page(self) -> int:
         return self._current_viewport_page
+
+    def selected_overlay_ids(self) -> list[str]:
+        overlay_ids: list[str] = []
+        for item in self._scene.selectedItems():
+            if isinstance(item, OverlayGraphicsItem):
+                overlay_ids.append(item.overlay.id)
+        return overlay_ids
+
+    def primary_selected_overlay_id(self) -> Optional[str]:
+        selected = self.selected_overlay_ids()
+        return selected[-1] if selected else None
+
+    def selected_overlay(self) -> Optional[OverlayItem]:
+        overlay_id = self.primary_selected_overlay_id()
+        if overlay_id is None:
+            return None
+        item = self._overlay_items.get(overlay_id)
+        return item.overlay if item is not None else None
+
+    def clear_selection(self) -> None:
+        self._scene.clearSelection()
+
+    def set_selected_overlay_ids(self, overlay_ids: list[str]) -> None:
+        ids = set(overlay_ids)
+        for overlay_id, item in self._overlay_items.items():
+            item.setSelected(overlay_id in ids)
+
+    def clamp_rect_to_page(self, page_index: int, rect_pdf: PdfRect) -> PdfRect:
+        page_rect = self._page_rects_scene.get(page_index)
+        if page_rect is None:
+            return PdfRect(rect_pdf.x, rect_pdf.y, rect_pdf.width, rect_pdf.height)
+
+        width = min(max(rect_pdf.width, _MIN_RECT), page_rect.width())
+        height = min(max(rect_pdf.height, _MIN_RECT), page_rect.height())
+        x = max(0.0, min(rect_pdf.x, page_rect.width() - width))
+        y = max(0.0, min(rect_pdf.y, page_rect.height() - height))
+        return PdfRect(x, y, width, height)
 
     def page_count(self) -> int:
         return len(self._page_rects_scene)
@@ -499,7 +563,7 @@ class PdfViewer(QGraphicsView):
             zoom=self._zoom,
             model_to_scene_rect=self._model_to_scene_rect,
             on_changed=self._scene_rect_to_model,
-            on_resized=lambda ov: self.overlay_resized.emit(ov),
+            on_geometry_committed=self._emit_geometry_change_committed,
         )
         item.setZValue(1)
         self._scene.addItem(item)
@@ -530,6 +594,17 @@ class PdfViewer(QGraphicsView):
         if page_index != self._current_viewport_page:
             self._current_viewport_page = page_index
             self.viewport_page_changed.emit(page_index)
+
+    def _emit_geometry_change_committed(
+        self,
+        overlay: OverlayItem,
+        before: PdfRect,
+        after: PdfRect,
+    ) -> None:
+        self.overlay_geometry_change_committed.emit(overlay.id, before, after)
+
+    def _on_scene_selection_changed(self) -> None:
+        self.selection_changed.emit(self.selected_overlay_ids())
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         super().scrollContentsBy(dx, dy)
@@ -604,8 +679,7 @@ class PdfViewer(QGraphicsView):
                 color=pending.color,
                 image_path=pending.image_path,
             )
-            self._add_overlay_item(overlay)
-            self.overlay_placed.emit(overlay)
+            self.overlay_placement_requested.emit(overlay)
             return
         super().mouseReleaseEvent(event)
 

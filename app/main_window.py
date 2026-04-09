@@ -6,7 +6,17 @@ from datetime import datetime
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QUndoCommand,
+    QUndoStack,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -31,8 +41,9 @@ from PySide6.QtWidgets import (
 )
 
 from app.image_service import validate_image_path
-from app.models import OverlayItem, OverlayType
+from app.models import OverlayItem, OverlayType, PdfRect
 from app.paths import resource_path
+from app.persistence import AppPersistence, ZOOM_MODE_CUSTOM, ZOOM_MODE_FIT
 from app.pdf_viewer import PdfViewer
 from app.settings import (
     APP_NAME,
@@ -56,16 +67,58 @@ from app.tools import (
 from app.widgets import StableComboBox
 
 
+class OverlayStateCommand(QUndoCommand):
+    def __init__(
+        self,
+        window: "MainWindow",
+        text: str,
+        before_overlays: list[OverlayItem],
+        before_selection: list[str],
+        after_overlays: list[OverlayItem],
+        after_selection: list[str],
+        redo_status: str = "",
+        undo_status: str = "",
+    ) -> None:
+        super().__init__(text)
+        self._window = window
+        self._before_overlays = copy.deepcopy(before_overlays)
+        self._before_selection = list(before_selection)
+        self._after_overlays = copy.deepcopy(after_overlays)
+        self._after_selection = list(after_selection)
+        self._redo_status = redo_status
+        self._undo_status = undo_status
+
+    def undo(self) -> None:
+        self._window._apply_overlays_state(
+            self._before_overlays,
+            self._before_selection,
+            status_msg=self._undo_status,
+        )
+
+    def redo(self) -> None:
+        self._window._apply_overlays_state(
+            self._after_overlays,
+            self._after_selection,
+            status_msg=self._redo_status,
+        )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, fonts_dir: str) -> None:
         super().__init__()
         self._fonts_dir = fonts_dir
         self._pdf_service = None   # created lazily on first PDF action
+        self._persistence = AppPersistence()
+        self._undo_stack = QUndoStack(self)
         self._overlays: List[OverlayItem] = []
         self._current_page: int = 0
         self._zoom: float = ZOOM_DEFAULT
+        self._zoom_mode: str = ZOOM_MODE_FIT
         self._image_path: Optional[str] = None
         self._current_mode: int = 0
+        self._copied_overlay: Optional[OverlayItem] = None
+        self._paste_count: int = 0
+        self._selected_overlay_ids: list[str] = []
 
         self.setObjectName("mainWindow")
         self.setWindowTitle(APP_NAME)
@@ -73,6 +126,8 @@ class MainWindow(QMainWindow):
 
         self._apply_theme()
         self._build_ui()
+        self._restore_persisted_inputs()
+        self._persistence.restore_window_geometry(self)
         self._update_controls()
 
     @property
@@ -123,6 +178,8 @@ class MainWindow(QMainWindow):
         app.setStyleSheet(build_stylesheet(THEME))
 
     def _build_ui(self) -> None:
+        self._create_actions()
+        self._build_menu_bar()
         self._build_toolbar()
 
         central = QWidget()
@@ -142,15 +199,87 @@ class MainWindow(QMainWindow):
 
         self._viewer = PdfViewer()
         self._viewer.setObjectName("pdfViewer")
-        self._viewer.overlay_placed.connect(self._on_overlay_placed)
-        self._viewer.overlay_deleted.connect(self._on_overlay_deleted)
+        self._viewer.overlay_placement_requested.connect(self._on_overlay_placement_requested)
+        self._viewer.delete_requested.connect(self._on_delete_requested)
         self._viewer.overlay_edit_requested.connect(self._on_overlay_edit_requested)
-        self._viewer.overlay_resized.connect(self._on_overlay_resized)
+        self._viewer.overlay_geometry_change_committed.connect(
+            self._on_overlay_geometry_change_committed
+        )
+        self._viewer.selection_changed.connect(self._on_viewer_selection_changed)
         self._viewer.viewport_page_changed.connect(self._on_viewport_page_changed)
         layout.addWidget(self._viewer, stretch=1)
 
         layout.addWidget(self._build_right_panel(), 0)
         self._build_statusbar()
+
+    def _create_actions(self) -> None:
+        self._act_open = QAction("Open PDF", self)
+        self._act_open.setIcon(self._svg_icon("open.svg"))
+        self._act_open.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Open))
+        self._act_open.triggered.connect(self._open_pdf)
+
+        self._act_save = QAction("Save As", self)
+        self._act_save.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Save))
+        self._act_save.triggered.connect(self._save_pdf)
+
+        self._act_undo = self._undo_stack.createUndoAction(self, "Undo")
+        self._act_undo.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Undo))
+
+        self._act_redo = self._undo_stack.createRedoAction(self, "Redo")
+        redo_shortcuts = QKeySequence.keyBindings(QKeySequence.StandardKey.Redo)
+        redo_shortcuts.append(QKeySequence("Ctrl+Y"))
+        redo_shortcuts.append(QKeySequence("Ctrl+Shift+Z"))
+        self._act_redo.setShortcuts(redo_shortcuts)
+
+        self._act_copy = QAction("Copy Overlay", self)
+        self._act_copy.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Copy))
+        self._act_copy.triggered.connect(self._copy_selected_overlay)
+
+        self._act_paste = QAction("Paste Overlay", self)
+        self._act_paste.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Paste))
+        self._act_paste.triggered.connect(self._paste_overlay)
+
+        self._act_delete = QAction("Delete Selected", self)
+        self._act_delete.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
+        self._act_delete.triggered.connect(self._delete_selected)
+
+        self._act_clear_page = QAction("Clear Current Page Overlays", self)
+        self._act_clear_page.triggered.connect(self._clear_overlays)
+
+        self._act_zoom_out = QAction("Zoom -", self)
+        self._act_zoom_out.triggered.connect(self._zoom_out)
+
+        self._act_zoom_in = QAction("Zoom +", self)
+        self._act_zoom_in.triggered.connect(self._zoom_in)
+
+        self._act_zoom_reset = QAction("Reset", self)
+        self._act_zoom_reset.setIcon(self._svg_icon("reset.svg"))
+        self._act_zoom_reset.triggered.connect(self._zoom_reset)
+
+        self._act_fit_page = QAction("Fit Page", self)
+        self._act_fit_page.setIcon(self._svg_icon("fitpage.svg"))
+        self._act_fit_page.triggered.connect(self._fit_page)
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("&File")
+        file_menu.addAction(self._act_open)
+        self._menu_recent = file_menu.addMenu("Open Recent")
+        self._menu_recent.aboutToShow.connect(self._rebuild_recent_menu)
+        file_menu.addAction(self._act_save)
+
+        edit_menu = menu_bar.addMenu("&Edit")
+        edit_menu.addAction(self._act_undo)
+        edit_menu.addAction(self._act_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._act_copy)
+        edit_menu.addAction(self._act_paste)
+        edit_menu.addAction(self._act_delete)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._act_clear_page)
+
+        self._rebuild_recent_menu()
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Main")
@@ -161,15 +290,11 @@ class MainWindow(QMainWindow):
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(tb)
 
-        self._act_open = QAction("Open PDF", self)
-        self._act_open.setIcon(self._svg_icon("open.svg"))
-        self._act_open.setShortcut("Ctrl+O")
-        self._act_open.triggered.connect(self._open_pdf)
         tb.addAction(self._act_open)
 
-        self._act_save = QAction("Save As", self)
-        self._act_save.setShortcut("Ctrl+S")
-        self._act_save.triggered.connect(self._save_pdf)
+        tb.addAction(self._act_save)
+        tb.addAction(self._act_undo)
+        tb.addAction(self._act_redo)
 
         tb.addWidget(self._toolbar_gap(14))
 
@@ -181,8 +306,6 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(self._toolbar_gap(8))
 
-        self._act_zoom_out = QAction("Zoom -", self)
-        self._act_zoom_out.triggered.connect(self._zoom_out)
         tb.addAction(self._act_zoom_out)
 
         self._lbl_zoom = QLabel("100%")
@@ -191,18 +314,10 @@ class MainWindow(QMainWindow):
         self._lbl_zoom.setMinimumWidth(64)
         tb.addWidget(self._lbl_zoom)
 
-        self._act_zoom_in = QAction("Zoom +", self)
-        self._act_zoom_in.triggered.connect(self._zoom_in)
         tb.addAction(self._act_zoom_in)
 
-        self._act_zoom_reset = QAction("Reset", self)
-        self._act_zoom_reset.setIcon(self._svg_icon("reset.svg"))
-        self._act_zoom_reset.triggered.connect(self._zoom_reset)
         tb.addAction(self._act_zoom_reset)
 
-        self._act_fit_page = QAction("Fit Page", self)
-        self._act_fit_page.setIcon(self._svg_icon("fitpage.svg"))
-        self._act_fit_page.triggered.connect(self._fit_page)
         tb.addAction(self._act_fit_page)
 
     @staticmethod
@@ -364,19 +479,19 @@ class MainWindow(QMainWindow):
 
         self._btn_delete = QPushButton("Delete Selected")
         self._btn_delete.setProperty("role", "quiet")
-        self._btn_delete.clicked.connect(self._delete_selected)
+        self._btn_delete.clicked.connect(self._act_delete.trigger)
         self._apply_button_icon(self._btn_delete, self._svg_icon("delete.svg"))
         action_layout.addWidget(self._btn_delete)
 
-        self._btn_clear = QPushButton("Clear All Overlays")
+        self._btn_clear = QPushButton("Clear Current Page")
         self._btn_clear.setProperty("role", "danger")
-        self._btn_clear.clicked.connect(self._clear_overlays)
+        self._btn_clear.clicked.connect(self._act_clear_page.trigger)
         self._apply_button_icon(self._btn_clear, self._svg_icon("Clear.svg"))
         action_layout.addWidget(self._btn_clear)
 
         self._btn_save_doc = QPushButton("Save Document")
         self._btn_save_doc.setProperty("role", "primary")
-        self._btn_save_doc.clicked.connect(self._save_pdf)
+        self._btn_save_doc.clicked.connect(self._act_save.trigger)
         self._apply_button_icon(
             self._btn_save_doc,
             self._svg_icon_tinted("save.svg", THEME.colors.primary_text),
@@ -444,10 +559,70 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._sb_zoom)
         sb.addPermanentWidget(self._sb_msg, 1)
 
+    def _restore_persisted_inputs(self) -> None:
+        inputs = self._persistence.tool_inputs()
+        self._sig_text.setText(inputs["signature_text"])
+        self._name_text.setText(inputs["name_text"])
+        self._date_text.setText(inputs["date_text"] or datetime.now().strftime(DEFAULT_DATE_FORMAT))
+
+        font_name = inputs["font_name"]
+        if font_name:
+            for idx, font in enumerate(SIGNATURE_FONTS):
+                if font["name"] == font_name:
+                    self._combo_font.setCurrentIndex(idx)
+                    break
+
+        color = inputs["color"]
+        if color in SUPPORTED_COLORS:
+            self._combo_color.setCurrentIndex(SUPPORTED_COLORS.index(color))
+
+        self._sig_text.textChanged.connect(self._persist_tool_inputs)
+        self._name_text.textChanged.connect(self._persist_tool_inputs)
+        self._date_text.textChanged.connect(self._persist_tool_inputs)
+        self._combo_font.currentIndexChanged.connect(self._persist_tool_inputs)
+        self._combo_color.currentIndexChanged.connect(self._persist_tool_inputs)
+        self._undo_stack.indexChanged.connect(lambda _index: self._update_controls())
+        self._persist_tool_inputs()
+
+    def _persist_tool_inputs(self) -> None:
+        self._persistence.save_tool_inputs(
+            signature_text=self._sig_text.text(),
+            name_text=self._name_text.text(),
+            date_text=self._date_text.text(),
+            font_name=self._combo_font.currentText(),
+            color=SUPPORTED_COLORS[self._combo_color.currentIndex()],
+        )
+
+    def _open_dialog_directory(self) -> str:
+        return self._persistence.last_open_dir() or os.path.dirname(self._pdf.path or "") or ""
+
+    def _save_dialog_directory(self) -> str:
+        return (
+            self._persistence.last_save_dir()
+            or os.path.dirname(self._pdf.path or "")
+            or self._persistence.last_open_dir()
+            or ""
+        )
+
     def _open_pdf(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
-        if not path:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open PDF",
+            self._open_dialog_directory(),
+            "PDF Files (*.pdf)",
+        )
+        if path:
+            self._open_pdf_path(path)
+
+    def _open_recent_pdf(self, path: str) -> None:
+        if not os.path.isfile(path):
+            self._persistence.remove_recent_file(path)
+            self._rebuild_recent_menu()
+            QMessageBox.warning(self, "Recent file missing", "That PDF is no longer available.")
             return
+        self._open_pdf_path(path)
+
+    def _open_pdf_path(self, path: str) -> None:
         try:
             self._pdf.open(path)
         except Exception as exc:
@@ -455,21 +630,45 @@ class MainWindow(QMainWindow):
             return
 
         self._overlays.clear()
+        self._viewer.clear_selection()
+        self._selected_overlay_ids = []
+        self._copied_overlay = None
+        self._paste_count = 0
+        self._undo_stack.clear()
         self._current_page = 0
         self._zoom = ZOOM_DEFAULT
+        self._zoom_mode = ZOOM_MODE_FIT
         self._sb_file.setText(os.path.basename(path))
-        self._update_controls()
+
+        opened_dir = os.path.dirname(path)
+        self._persistence.set_last_open_dir(opened_dir)
+        self._persistence.add_recent_file(path)
+        self._rebuild_recent_menu()
+
         self._load_document()
         self._populate_page_list()
         self._set_page_list_current(self._current_page)
-        self._fit_page()
+
+        zoom_mode, zoom_value = self._persistence.zoom_preference()
+        if zoom_mode == ZOOM_MODE_CUSTOM:
+            self._set_zoom(zoom_value, persist=True)
+        else:
+            self._fit_page()
+
+        self._status_msg(f"Opened: {os.path.basename(path)}")
+        self._update_controls()
 
     def _save_pdf(self) -> None:
         if not self._pdf.is_open:
             QMessageBox.warning(self, "No PDF", "Please open a PDF first.")
             return
 
-        path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", "", "PDF Files (*.pdf)")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save PDF As",
+            self._save_dialog_directory(),
+            "PDF Files (*.pdf)",
+        )
         if not path:
             return
         if not path.lower().endswith(".pdf"):
@@ -489,6 +688,7 @@ class MainWindow(QMainWindow):
 
         try:
             self._pdf.save(self._overlays, path)
+            self._persistence.set_last_save_dir(os.path.dirname(path))
             self._status_msg(f"Saved: {os.path.basename(path)}")
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
@@ -510,17 +710,22 @@ class MainWindow(QMainWindow):
         if fit_zoom is None:
             return
         fit_zoom = max(ZOOM_MIN, min(fit_zoom, ZOOM_MAX))
-        self._set_zoom(fit_zoom)
+        self._set_zoom(fit_zoom, persist=False)
+        self._zoom_mode = ZOOM_MODE_FIT
+        self._persistence.set_zoom_preference(ZOOM_MODE_FIT, fit_zoom)
         self._viewer.scroll_to_page(page_index)
 
-    def _set_zoom(self, zoom: float) -> None:
+    def _set_zoom(self, zoom: float, persist: bool = True) -> None:
         if not self._pdf.is_open:
             return
         focus_page = self._viewer.current_viewport_page()
         self._zoom = zoom
+        self._zoom_mode = ZOOM_MODE_CUSTOM
         self._pdf.invalidate_cache()
         self._load_document()
         self._viewer.scroll_to_page(focus_page)
+        if persist:
+            self._persistence.set_zoom_preference(ZOOM_MODE_CUSTOM, zoom)
         self._update_controls()
 
     def _on_mode_changed(self, index: int) -> None:
@@ -627,20 +832,20 @@ class MainWindow(QMainWindow):
         if not self._pdf.is_open:
             return
         page_index = self._viewer.current_viewport_page()
-        page_ids = {ov.id for ov in self._overlays if ov.page_index == page_index}
-        self._overlays = [ov for ov in self._overlays if ov.id not in page_ids]
-        self._viewer.clear_overlays_for_page(page_index)
-        self._status_msg("Cleared all overlays on this page.")
-
-    def _on_overlay_placed(self, overlay: OverlayItem) -> None:
-        self._compute_overlay_font_size(overlay)
-        self._viewer.refresh_overlay(overlay.id)
-        self._overlays.append(overlay)
-        self._status_msg("Overlay placed. Draw another or click Place to continue.")
-
-    def _on_overlay_resized(self, overlay: OverlayItem) -> None:
-        self._compute_overlay_font_size(overlay)
-        self._viewer.refresh_overlay(overlay.id)
+        page_ids = [ov.id for ov in self._overlays if ov.page_index == page_index]
+        if not page_ids:
+            return
+        before_overlays = self._snapshot_overlays()
+        after_overlays = [ov for ov in before_overlays if ov.id not in set(page_ids)]
+        self._push_state_command(
+            "Clear Current Page Overlays",
+            before_overlays,
+            self._selected_overlay_ids,
+            after_overlays,
+            [],
+            redo_status="Cleared overlays on the current page.",
+            undo_status="Restored overlays on the current page.",
+        )
 
     def _compute_overlay_font_size(self, overlay: OverlayItem) -> None:
         if overlay.type == OverlayType.signature_image or not overlay.text:
@@ -655,8 +860,191 @@ class MainWindow(QMainWindow):
             overlay.rect_pdf.height,
         )
 
-    def _on_overlay_deleted(self, overlay_id: str) -> None:
-        self._overlays = [ov for ov in self._overlays if ov.id != overlay_id]
+    def _compute_overlay_font_sizes(self, overlays: list[OverlayItem]) -> None:
+        if not self._pdf.is_open:
+            return
+        for overlay in overlays:
+            self._compute_overlay_font_size(overlay)
+
+    def _snapshot_overlays(self) -> list[OverlayItem]:
+        return copy.deepcopy(self._overlays)
+
+    def _overlay_by_id(self, overlay_id: str, overlays: Optional[list[OverlayItem]] = None) -> Optional[OverlayItem]:
+        source = self._overlays if overlays is None else overlays
+        return next((overlay for overlay in source if overlay.id == overlay_id), None)
+
+    def _selected_overlay(self) -> Optional[OverlayItem]:
+        selected_id = self._viewer.primary_selected_overlay_id()
+        if selected_id is None:
+            return None
+        return self._overlay_by_id(selected_id)
+
+    def _apply_overlay_snapshot(self, overlays: list[OverlayItem], overlay_snapshot: OverlayItem) -> None:
+        for index, overlay in enumerate(overlays):
+            if overlay.id == overlay_snapshot.id:
+                overlays[index] = copy.deepcopy(overlay_snapshot)
+                return
+
+    def _push_state_command(
+        self,
+        text: str,
+        before_overlays: list[OverlayItem],
+        before_selection: list[str],
+        after_overlays: list[OverlayItem],
+        after_selection: list[str],
+        *,
+        redo_status: str = "",
+        undo_status: str = "",
+    ) -> None:
+        if before_overlays == after_overlays and list(before_selection) == list(after_selection):
+            return
+        self._undo_stack.push(
+            OverlayStateCommand(
+                self,
+                text,
+                before_overlays,
+                before_selection,
+                after_overlays,
+                after_selection,
+                redo_status=redo_status,
+                undo_status=undo_status,
+            )
+        )
+
+    def _apply_overlays_state(
+        self,
+        overlays: list[OverlayItem],
+        selected_overlay_ids: list[str],
+        status_msg: str = "",
+    ) -> None:
+        if not self._pdf.is_open:
+            return
+        focus_page = self._current_page
+        if selected_overlay_ids:
+            selected_overlay = next(
+                (overlay for overlay in overlays if overlay.id == selected_overlay_ids[-1]),
+                None,
+            )
+            if selected_overlay is not None:
+                focus_page = selected_overlay.page_index
+
+        self._overlays = copy.deepcopy(overlays)
+        self._compute_overlay_font_sizes(self._overlays)
+        self._load_document()
+        if self._pdf.page_count:
+            focus_page = max(0, min(focus_page, self._pdf.page_count - 1))
+            self._viewer.scroll_to_page(focus_page)
+        self._viewer.set_selected_overlay_ids(selected_overlay_ids)
+        self._selected_overlay_ids = [
+            overlay_id for overlay_id in selected_overlay_ids
+            if self._overlay_by_id(overlay_id) is not None
+        ]
+        self._update_controls()
+        if status_msg:
+            self._status_msg(status_msg)
+
+    def _copy_selected_overlay(self) -> None:
+        overlay = self._selected_overlay()
+        if overlay is None:
+            return
+        self._copied_overlay = copy.deepcopy(overlay)
+        self._paste_count = 0
+        self._status_msg("Overlay copied.")
+        self._update_controls()
+
+    def _paste_overlay(self) -> None:
+        if not self._pdf.is_open or self._copied_overlay is None:
+            return
+
+        page_index = self._viewer.current_viewport_page()
+        self._paste_count += 1
+        pasted_overlay = copy.deepcopy(self._copied_overlay)
+        pasted_overlay.id = OverlayItem(
+            page_index=page_index,
+            type=pasted_overlay.type,
+            rect_pdf=PdfRect(0, 0, 1, 1),
+        ).id
+        pasted_overlay.page_index = page_index
+        pasted_overlay.rect_pdf = self._viewer.clamp_rect_to_page(
+            page_index,
+            PdfRect(
+                pasted_overlay.rect_pdf.x + (12.0 * self._paste_count),
+                pasted_overlay.rect_pdf.y + (12.0 * self._paste_count),
+                pasted_overlay.rect_pdf.width,
+                pasted_overlay.rect_pdf.height,
+            ),
+        )
+
+        before_overlays = self._snapshot_overlays()
+        after_overlays = before_overlays + [pasted_overlay]
+        self._push_state_command(
+            "Paste Overlay",
+            before_overlays,
+            self._selected_overlay_ids,
+            after_overlays,
+            [pasted_overlay.id],
+            redo_status="Overlay pasted.",
+            undo_status="Paste undone.",
+        )
+
+    def _on_overlay_placement_requested(self, overlay: OverlayItem) -> None:
+        before_overlays = self._snapshot_overlays()
+        after_overlays = before_overlays + [copy.deepcopy(overlay)]
+        self._push_state_command(
+            "Add Overlay",
+            before_overlays,
+            self._selected_overlay_ids,
+            after_overlays,
+            [overlay.id],
+            redo_status="Overlay placed. Draw another or click Place to continue.",
+            undo_status="Overlay removed.",
+        )
+
+    def _on_delete_requested(self, overlay_ids: list[str]) -> None:
+        if not overlay_ids:
+            return
+        overlay_id_set = set(overlay_ids)
+        before_overlays = self._snapshot_overlays()
+        after_overlays = [ov for ov in before_overlays if ov.id not in overlay_id_set]
+        self._push_state_command(
+            "Delete Overlay",
+            before_overlays,
+            self._selected_overlay_ids,
+            after_overlays,
+            [],
+            redo_status="Overlay deleted.",
+            undo_status="Overlay restored.",
+        )
+
+    def _on_overlay_geometry_change_committed(
+        self,
+        overlay_id: str,
+        before_rect: PdfRect,
+        after_rect: PdfRect,
+    ) -> None:
+        overlay = self._overlay_by_id(overlay_id)
+        if overlay is None or before_rect == after_rect:
+            return
+
+        self._compute_overlay_font_size(overlay)
+        self._viewer.refresh_overlay(overlay_id)
+
+        before_overlays = self._snapshot_overlays()
+        before_overlay = self._overlay_by_id(overlay_id, before_overlays)
+        if before_overlay is None:
+            return
+        before_overlay.rect_pdf = copy.deepcopy(before_rect)
+        self._compute_overlay_font_size(before_overlay)
+
+        self._push_state_command(
+            "Adjust Overlay",
+            before_overlays,
+            self._selected_overlay_ids,
+            self._snapshot_overlays(),
+            self._selected_overlay_ids,
+            redo_status="Overlay updated.",
+            undo_status="Overlay change undone.",
+        )
 
     def _on_overlay_edit_requested(self, overlay: OverlayItem) -> None:
         original_overlay = copy.deepcopy(overlay)
@@ -666,6 +1054,21 @@ class MainWindow(QMainWindow):
             dialog.apply_to(overlay)
             self._compute_overlay_font_size(overlay)
             self._viewer.refresh_overlay(overlay.id)
+            before_overlays = self._snapshot_overlays()
+            original_in_snapshot = self._overlay_by_id(overlay.id, before_overlays)
+            if original_in_snapshot is None:
+                return
+            self._restore_overlay(original_in_snapshot, original_overlay)
+            self._compute_overlay_font_size(original_in_snapshot)
+            self._push_state_command(
+                "Edit Overlay",
+                before_overlays,
+                self._selected_overlay_ids,
+                self._snapshot_overlays(),
+                self._selected_overlay_ids,
+                redo_status="Overlay updated.",
+                undo_status="Overlay edit undone.",
+            )
         else:
             self._restore_overlay(overlay, original_overlay)
             self._viewer.refresh_overlay(overlay.id)
@@ -684,6 +1087,10 @@ class MainWindow(QMainWindow):
         target.color = source.color
         target.image_path = source.image_path
         target.font_size = source.font_size
+
+    def _on_viewer_selection_changed(self, overlay_ids: list[str]) -> None:
+        self._selected_overlay_ids = list(overlay_ids)
+        self._update_controls()
 
     def _on_viewport_page_changed(self, page_index: int) -> None:
         self._current_page = page_index
@@ -723,21 +1130,40 @@ class MainWindow(QMainWindow):
         self._list_pages.scrollToItem(self._list_pages.item(page_index))
         self._list_pages.blockSignals(prev)
 
+    def _rebuild_recent_menu(self) -> None:
+        self._menu_recent.clear()
+        recent_files = self._persistence.recent_files()
+        self._menu_recent.setEnabled(bool(recent_files))
+        if not recent_files:
+            action = self._menu_recent.addAction("(No recent files)")
+            action.setEnabled(False)
+            return
+
+        for path in recent_files:
+            action = self._menu_recent.addAction(path)
+            action.triggered.connect(lambda checked=False, p=path: self._open_recent_pdf(p))
+
     def _update_controls(self) -> None:
         open_ = self._pdf.is_open
         pc = self._pdf.page_count if open_ else 0
         pg = self._current_page
+        has_selection = bool(self._selected_overlay_ids)
+        has_page_overlays = any(ov.page_index == pg for ov in self._overlays)
 
         self._act_save.setEnabled(open_)
+        self._act_copy.setEnabled(open_ and has_selection)
+        self._act_paste.setEnabled(open_ and self._copied_overlay is not None)
+        self._act_delete.setEnabled(open_ and has_selection)
+        self._act_clear_page.setEnabled(open_ and has_page_overlays)
         self._act_zoom_in.setEnabled(open_ and self._zoom < ZOOM_MAX)
         self._act_zoom_out.setEnabled(open_ and self._zoom > ZOOM_MIN)
         self._act_zoom_reset.setEnabled(open_)
         self._act_fit_page.setEnabled(open_)
 
         self._btn_place.setEnabled(open_)
-        self._btn_delete.setEnabled(open_)
-        self._btn_clear.setEnabled(open_)
-        self._btn_save_doc.setEnabled(open_)
+        self._btn_delete.setEnabled(self._act_delete.isEnabled())
+        self._btn_clear.setEnabled(self._act_clear_page.isEnabled())
+        self._btn_save_doc.setEnabled(self._act_save.isEnabled())
         self._list_pages.setEnabled(open_)
 
         if open_:
@@ -753,6 +1179,11 @@ class MainWindow(QMainWindow):
 
     def _status_msg(self, msg: str) -> None:
         self._sb_msg.setText(msg)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._persist_tool_inputs()
+        self._persistence.save_window_geometry(self)
+        super().closeEvent(event)
 
 
 class EditOverlayDialog(QDialog):
