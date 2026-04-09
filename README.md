@@ -14,6 +14,7 @@ This project is a **visual PDF signature/annotation tool**, not a certified digi
   - Date
 - Drag, resize, move, edit, and delete overlays before export
 - Save a flattened PDF output with overlays applied
+- Save typed or image signature presets locally for reuse
 - Local-first workflow (no cloud dependency)
 
 ## Screenshots
@@ -41,9 +42,11 @@ python main.py
 2. Open a PDF using **Open PDF**.
 3. Choose an overlay type in **Overlay Tools**.
 4. Enter text or select a signature image.
-5. Click **Place eSign** (or the relevant Place button), then draw on the page.
-6. Adjust overlay position/size as needed.
-7. Export using **Save Document**.
+5. Optionally click **Save as Preset** in the **Presets** section to keep that signature for later.
+6. Click **Place eSign** (or the relevant Place button), then draw on the page.
+7. Or choose a saved signature preset and click **Use Selected** to drop it onto the current page instantly.
+8. Adjust overlay position/size as needed.
+9. Export using **Save Document**.
 
 ## How It Works
 - The app uses overlay objects for signature/name/date/image elements.
@@ -55,6 +58,14 @@ python main.py
   - They are intentionally non-selectable as text.
 - **Name** and **Date** overlays are saved as regular PDF text.
 - **Signature Image** overlays are embedded as image content.
+
+### Signature Presets
+- Signature presets apply only to signature overlays:
+  - typed signatures
+  - imported signature images
+- Presets are stored locally per user in the app's normal local app-data location.
+- The app keeps preset metadata in a JSON manifest and stores copied image assets in a managed presets folder.
+- Image presets do not depend on the original import path remaining available after the preset is saved.
 
 ## Limitations
 - No built-in signer identity verification

@@ -12,6 +12,11 @@ class OverlayType(Enum):
     date = "date"
 
 
+class SignaturePresetType(Enum):
+    typed = "typed"
+    image = "image"
+
+
 @dataclass
 class PdfRect:
     x: float
@@ -35,3 +40,19 @@ class OverlayItem:
     color: Optional[str] = None       # "black" | "blue"
     image_path: Optional[str] = None
     font_size: Optional[float] = None  # PDF points; computed via PyMuPDF, used in both preview and save
+
+
+@dataclass
+class SignaturePreset:
+    name: str
+    preset_type: SignaturePresetType
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    text: Optional[str] = None
+    font_name: Optional[str] = None
+    color: Optional[str] = None
+    asset_filename: Optional[str] = None
+    resolved_image_path: Optional[str] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+    is_available: bool = True
+    load_error: Optional[str] = None

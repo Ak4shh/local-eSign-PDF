@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
@@ -41,10 +42,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.image_service import validate_image_path
-from app.models import OverlayItem, OverlayType, PdfRect
+from app.models import OverlayItem, OverlayType, PdfRect, SignaturePresetType
 from app.paths import resource_path
 from app.persistence import AppPersistence, ZOOM_MODE_CUSTOM, ZOOM_MODE_FIT
 from app.pdf_viewer import PdfViewer
+from app.signature_presets import SignaturePresetService
+from app.signature_presets_widget import SignaturePresetsPanel
 from app.settings import (
     APP_NAME,
     DEFAULT_DATE_FORMAT,
@@ -109,6 +112,7 @@ class MainWindow(QMainWindow):
         self._fonts_dir = fonts_dir
         self._pdf_service = None   # created lazily on first PDF action
         self._persistence = AppPersistence()
+        self._preset_service = SignaturePresetService()
         self._undo_stack = QUndoStack(self)
         self._overlays: List[OverlayItem] = []
         self._current_page: int = 0
@@ -127,8 +131,11 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self._build_ui()
         self._restore_persisted_inputs()
+        self._refresh_presets()
         self._persistence.restore_window_geometry(self)
         self._update_controls()
+        if self._preset_service.load_warnings:
+            self._status_msg(self._preset_service.load_warnings[0])
 
     @property
     def _pdf(self):
@@ -465,6 +472,13 @@ class MainWindow(QMainWindow):
         context_layout.addWidget(self._combo_color)
         layout.addWidget(context_card)
 
+        self._preset_panel = SignaturePresetsPanel()
+        self._preset_panel.save_requested.connect(self._save_current_signature_preset)
+        self._preset_panel.use_requested.connect(self._use_signature_preset)
+        self._preset_panel.rename_requested.connect(self._rename_signature_preset)
+        self._preset_panel.delete_requested.connect(self._delete_signature_preset)
+        layout.addWidget(self._preset_panel)
+
         action_card = QFrame()
         action_card.setObjectName("actionCard")
         action_layout = QVBoxLayout(action_card)
@@ -581,6 +595,9 @@ class MainWindow(QMainWindow):
         self._date_text.textChanged.connect(self._persist_tool_inputs)
         self._combo_font.currentIndexChanged.connect(self._persist_tool_inputs)
         self._combo_color.currentIndexChanged.connect(self._persist_tool_inputs)
+        self._sig_text.textChanged.connect(lambda _text: self._preset_panel.set_save_enabled(self._can_save_signature_preset()))
+        self._combo_font.currentIndexChanged.connect(lambda _index: self._preset_panel.set_save_enabled(self._can_save_signature_preset()))
+        self._combo_color.currentIndexChanged.connect(lambda _index: self._preset_panel.set_save_enabled(self._can_save_signature_preset()))
         self._undo_stack.indexChanged.connect(lambda _index: self._update_controls())
         self._persist_tool_inputs()
 
@@ -744,6 +761,10 @@ class MainWindow(QMainWindow):
         self._lbl_color.setVisible(color_visible)
         self._combo_color.setVisible(color_visible)
         self._btn_place.setText(self._place_label_for_mode(index))
+        preset_visible = index in (0, 1)
+        self._preset_panel.setVisible(preset_visible)
+        if preset_visible:
+            self._refresh_presets()
 
     @staticmethod
     def _place_label_for_mode(index: int) -> str:
@@ -768,6 +789,183 @@ class MainWindow(QMainWindow):
             return
         self._image_path = path
         self._lbl_image.setText(os.path.basename(path))
+        self._preset_panel.set_save_enabled(self._can_save_signature_preset())
+
+    def _refresh_presets(self) -> None:
+        preset_type = SignaturePresetType.typed if self._current_mode == 0 else SignaturePresetType.image
+        label = "typed signatures" if self._current_mode == 0 else "signature images"
+        filtered = [p for p in self._preset_service.presets() if p.preset_type == preset_type]
+        self._preset_panel.set_presets(filtered, label=label)
+        self._preset_panel.set_save_enabled(self._can_save_signature_preset())
+
+    def _can_save_signature_preset(self) -> bool:
+        if self._current_mode == 0:
+            return validate_typed_signature(
+                self._sig_text.text().strip(),
+                self._combo_font.currentText(),
+            ) is None
+        if self._current_mode == 1:
+            return validate_signature_image(self._image_path) is None
+        return False
+
+    def _signature_preset_name_dialog(self, title: str, initial: str = "") -> Optional[str]:
+        name, ok = QInputDialog.getText(
+            self,
+            title,
+            "Preset name:",
+            text=initial,
+        )
+        if not ok:
+            return None
+        return name
+
+    def _save_current_signature_preset(self) -> None:
+        if self._current_mode not in (0, 1):
+            return
+        suggested = self._sig_text.text().strip() if self._current_mode == 0 else ""
+        name = self._signature_preset_name_dialog("Save Signature Preset", suggested)
+        if name is None:
+            return
+
+        try:
+            if self._current_mode == 0:
+                self._preset_service.save_typed_preset(
+                    name=name,
+                    text=self._sig_text.text().strip(),
+                    font_name=self._combo_font.currentText(),
+                    color=SUPPORTED_COLORS[self._combo_color.currentIndex()],
+                )
+            else:
+                self._preset_service.save_image_preset(
+                    name=name,
+                    source_image_path=self._image_path or "",
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not save preset", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not save preset", str(exc))
+            return
+
+        self._refresh_presets()
+        self._status_msg("Signature preset saved.")
+
+    def _rename_signature_preset(self, preset_id: str) -> None:
+        preset = self._preset_service.get_preset(preset_id)
+        if preset is None:
+            return
+        name = self._signature_preset_name_dialog("Rename Signature Preset", preset.name)
+        if name is None:
+            return
+        try:
+            self._preset_service.rename_preset(preset_id, name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not rename preset", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not rename preset", str(exc))
+            return
+        self._refresh_presets()
+        self._status_msg("Signature preset renamed.")
+
+    def _delete_signature_preset(self, preset_id: str) -> None:
+        preset = self._preset_service.get_preset(preset_id)
+        if preset is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete preset?",
+            f'Delete the preset "{preset.name}"?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._preset_service.delete_preset(preset_id)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not delete preset", str(exc))
+            return
+        self._refresh_presets()
+        self._status_msg("Signature preset deleted.")
+
+    def _use_signature_preset(self, preset_id: str) -> None:
+        preset = self._preset_service.get_preset(preset_id)
+        if preset is None:
+            return
+        if not self._pdf.is_open:
+            QMessageBox.warning(self, "No PDF", "Please open a PDF first.")
+            return
+
+        try:
+            overlay = self._preset_service.create_overlay(
+                preset,
+                page_index=self._viewer.current_viewport_page(),
+                rect_pdf=self._default_rect_for_signature_preset(preset),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Preset unavailable", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not use preset", str(exc))
+            return
+
+        self._apply_signature_preset_to_inputs(preset)
+        self._compute_overlay_font_size(overlay)
+        before_overlays = self._snapshot_overlays()
+        after_overlays = before_overlays + [overlay]
+        self._push_state_command(
+            "Insert Signature Preset",
+            before_overlays,
+            self._selected_overlay_ids,
+            after_overlays,
+            [overlay.id],
+            redo_status="Signature preset inserted.",
+            undo_status="Signature preset insertion undone.",
+        )
+
+    def _apply_signature_preset_to_inputs(self, preset) -> None:
+        if preset.preset_type == SignaturePresetType.typed:
+            self._current_mode = 0
+            self._apply_mode_ui(0)
+            self._sig_text.setText(preset.text or "")
+            if preset.font_name:
+                for idx, font in enumerate(SIGNATURE_FONTS):
+                    if font["name"] == preset.font_name:
+                        self._combo_font.setCurrentIndex(idx)
+                        break
+            if preset.color in SUPPORTED_COLORS:
+                self._combo_color.setCurrentIndex(SUPPORTED_COLORS.index(preset.color))
+            return
+
+        self._current_mode = 1
+        self._apply_mode_ui(1)
+        self._image_path = preset.resolved_image_path
+        self._lbl_image.setText(os.path.basename(self._image_path) if self._image_path else "(missing)")
+
+    def _default_rect_for_signature_preset(self, preset) -> PdfRect:
+        page_index = self._viewer.current_viewport_page()
+        page_width, page_height = self._pdf.page_size(page_index)
+
+        if preset.preset_type == SignaturePresetType.typed:
+            width = min(max(140.0, len((preset.text or "").strip()) * 13.0), max(page_width * 0.46, 140.0))
+            height = min(max(42.0, page_height * 0.085), 72.0)
+        else:
+            width = min(max(page_width * 0.32, 120.0), 220.0)
+            aspect = 2.6
+            if preset.image_width and preset.image_height and preset.image_height > 0:
+                aspect = preset.image_width / preset.image_height
+            height = width / max(aspect, 0.2)
+            if height > page_height * 0.24:
+                height = page_height * 0.24
+                width = height * max(aspect, 0.2)
+
+        rect = PdfRect(
+            max((page_width - width) / 2.0, 0.0),
+            max((page_height - height) / 2.0, 0.0),
+            width,
+            height,
+        )
+        return self._viewer.clamp_rect_to_page(page_index, rect)
 
     def _start_placement(self) -> None:
         if not self._pdf.is_open:
